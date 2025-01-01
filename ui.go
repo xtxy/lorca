@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"reflect"
 )
@@ -67,10 +66,7 @@ func New(url, dir string, width, height int, customArgs ...string) (UI, error) {
 	}
 	tmpDir := ""
 	if dir == "" {
-		name, err := ioutil.TempDir("", "lorca")
-		if err != nil {
-			return nil, err
-		}
+		name := os.TempDir()
 		dir, tmpDir = name, name
 	}
 	args := append(defaultChromeArgs, fmt.Sprintf("--app=%s", url))

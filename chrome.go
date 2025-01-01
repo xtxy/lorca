@@ -2,21 +2,48 @@ package lorca
 
 import (
 	"bufio"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
-	"log"
+	"net/http"
+	"net/url"
 	"os/exec"
 	"regexp"
 	"sync"
 	"sync/atomic"
+	"time"
 
-	"golang.org/x/net/websocket"
+	"github.com/gorilla/websocket"
 )
 
-type h = map[string]interface{}
+type websocketWrapper struct {
+	conn *websocket.Conn
+}
+
+func (w *websocketWrapper) Write(p []byte) (n int, err error) {
+	err = w.conn.WriteMessage(websocket.TextMessage, p)
+	if err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func (w *websocketWrapper) Read(p []byte) (n int, err error) {
+	_, message, err := w.conn.ReadMessage()
+	if err != nil {
+		return 0, err
+	}
+	copy(p, message)
+	return len(message), nil
+}
+
+func (w *websocketWrapper) Close() error {
+	return w.conn.Close()
+}
+
+type h = map[string]any
 
 // Result is a struct for the resulting value of the JS expression or an error.
 type result struct {
@@ -24,7 +51,7 @@ type result struct {
 	Err   error
 }
 
-type bindingFunc func(args []json.RawMessage) (interface{}, error)
+type bindingFunc func(args []json.RawMessage) (any, error)
 
 // Msg is a struct for incoming messages (results and async events)
 type msg struct {
@@ -38,7 +65,7 @@ type msg struct {
 type chrome struct {
 	sync.Mutex
 	cmd      *exec.Cmd
-	ws       *websocket.Conn
+	ws       *websocketWrapper
 	id       int32
 	target   string
 	session  string
@@ -74,12 +101,69 @@ func newChromeWithArgs(chromeBinary string, args ...string) (*chrome, error) {
 	}
 	wsURL := m[1]
 
-	// Open a websocket
-	c.ws, err = websocket.Dial(wsURL, "", "http://127.0.0.1")
+	u, err := url.Parse(wsURL)
 	if err != nil {
 		c.kill()
 		return nil, err
 	}
+
+	resp, err := http.Get(fmt.Sprintf("http://%s/json", u.Host))
+	if err != nil {
+		c.kill()
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var targets []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&targets); err != nil {
+		c.kill()
+		return nil, err
+	}
+
+	var targetURL string
+	for _, t := range targets {
+		if t["type"] == "page" {
+			targetURL = t["webSocketDebuggerUrl"].(string)
+			break
+		}
+	}
+
+	if targetURL == "" {
+		c.kill()
+		return nil, fmt.Errorf("no available target found")
+	}
+
+	dialer := websocket.Dialer{
+		EnableCompression: true,
+		HandshakeTimeout:  10 * time.Second,
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+		},
+	}
+
+	header := http.Header{
+		"Origin":        {"http://" + u.Host},
+		"Pragma":        {"no-cache"},
+		"Cache-Control": {"no-cache"},
+		// "Connection":            {"Upgrade"},
+		// "Upgrade":               {"websocket"},
+		"Sec-WebSocket-Version": {"13"},
+	}
+
+	fmt.Printf("Attempting to connect to: %s\n", targetURL)
+	fmt.Printf("Headers: %+v\n", header)
+
+	wsConn, resp, err := dialer.Dial(targetURL, header)
+	if err != nil {
+		if resp != nil {
+			io.ReadAll(resp.Body)
+			resp.Body.Close()
+		}
+		c.kill()
+		return nil, err
+	}
+
+	c.ws = &websocketWrapper{conn: wsConn}
 
 	// Find target and initialize session
 	c.target, err = c.findTarget()
@@ -123,7 +207,7 @@ func newChromeWithArgs(chromeBinary string, args ...string) (*chrome, error) {
 }
 
 func (c *chrome) findTarget() (string, error) {
-	err := websocket.JSON.Send(c.ws, h{
+	err := c.ws.conn.WriteJSON(h{
 		"id": 0, "method": "Target.setDiscoverTargets", "params": h{"discover": true},
 	})
 	if err != nil {
@@ -131,7 +215,7 @@ func (c *chrome) findTarget() (string, error) {
 	}
 	for {
 		m := msg{}
-		if err = websocket.JSON.Receive(c.ws, &m); err != nil {
+		if err = c.ws.conn.ReadJSON(&m); err != nil {
 			return "", err
 		} else if m.Method == "Target.targetCreated" {
 			target := struct {
@@ -150,7 +234,7 @@ func (c *chrome) findTarget() (string, error) {
 }
 
 func (c *chrome) startSession(target string) (string, error) {
-	err := websocket.JSON.Send(c.ws, h{
+	err := c.ws.conn.WriteJSON(h{
 		"id": 1, "method": "Target.attachToTarget", "params": h{"targetId": target},
 	})
 	if err != nil {
@@ -158,7 +242,7 @@ func (c *chrome) startSession(target string) (string, error) {
 	}
 	for {
 		m := msg{}
-		if err = websocket.JSON.Receive(c.ws, &m); err != nil {
+		if err = c.ws.conn.ReadJSON(&m); err != nil {
 			return "", err
 		} else if m.ID == 1 {
 			if m.Error != nil {
@@ -253,7 +337,7 @@ type targetMessage struct {
 func (c *chrome) readLoop() {
 	for {
 		m := msg{}
-		if err := websocket.JSON.Receive(c.ws, &m); err != nil {
+		if err := c.ws.conn.ReadJSON(&m); err != nil {
 			return
 		}
 
@@ -269,8 +353,7 @@ func (c *chrome) readLoop() {
 			res := targetMessage{}
 			json.Unmarshal([]byte(params.Message), &res)
 
-			if res.ID == 0 && res.Method == "Runtime.consoleAPICalled" || res.Method == "Runtime.exceptionThrown" {
-				log.Println(params.Message)
+			if res.ID == 0 && res.Method == "Runtime.exceptionThrown" {
 			} else if res.ID == 0 && res.Method == "Runtime.bindingCalled" {
 				payload := struct {
 					Name string            `json:"name"`
@@ -354,7 +437,7 @@ func (c *chrome) send(method string, params h) (json.RawMessage, error) {
 	c.pending[int(id)] = resc
 	c.Unlock()
 
-	if err := websocket.JSON.Send(c.ws, h{
+	if err := c.ws.conn.WriteJSON(h{
 		"id":     int(id),
 		"method": "Target.sendMessageToTarget",
 		"params": h{"message": string(b), "sessionId": c.session},
@@ -519,11 +602,12 @@ func (c *chrome) kill() error {
 func readUntilMatch(r io.ReadCloser, re *regexp.Regexp) ([]string, error) {
 	br := bufio.NewReader(r)
 	for {
-		if line, err := br.ReadString('\n'); err != nil {
+		line, err := br.ReadString('\n')
+		if err != nil {
 			r.Close()
 			return nil, err
 		} else if m := re.FindStringSubmatch(line); m != nil {
-			go io.Copy(ioutil.Discard, br)
+			go io.Copy(io.Discard, br)
 			return m, nil
 		}
 	}
