@@ -139,6 +139,8 @@ func newChromeWithArgs(chromeBinary string, args ...string) (*chrome, error) {
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: true,
 		},
+		ReadBufferSize:  32 * 1024 * 1024,
+		WriteBufferSize: 32 * 1024 * 1024,
 	}
 
 	header := http.Header{

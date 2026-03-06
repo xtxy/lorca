@@ -22,10 +22,17 @@ func LocateChrome() string {
 		}
 	}
 
+	currentDir, _ := os.Getwd()
+
 	var paths []string
 	switch runtime.GOOS {
 	case "darwin":
 		paths = []string{
+			currentDir + "/Google Chrome.app/Contents/MacOS/Google Chrome",
+			currentDir + "/Chromium.app/Contents/MacOS/Chromium",
+			"/Applications/Chromium.app/Contents/MacOS/Chromium",
+			"/usr/bin/chromium",
+			"/usr/bin/chromium-browser",
 			"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
 			"/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
 			"/Applications/Chromium.app/Contents/MacOS/Chromium",
@@ -37,6 +44,8 @@ func LocateChrome() string {
 		}
 	case "windows":
 		paths = []string{
+			currentDir + "/chrome/App/chrome.exe",
+			currentDir + "/chrome/chrome.exe",
 			os.Getenv("LocalAppData") + "/Google/Chrome/Application/chrome.exe",
 			os.Getenv("ProgramFiles") + "/Google/Chrome/Application/chrome.exe",
 			os.Getenv("ProgramFiles(x86)") + "/Google/Chrome/Application/chrome.exe",
