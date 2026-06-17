@@ -63,7 +63,8 @@ type msg struct {
 }
 
 type chrome struct {
-	sync.Mutex
+	lock     sync.Mutex
+	sendLock sync.Mutex
 	cmd      *exec.Cmd
 	ws       *websocketWrapper
 	id       int32
@@ -364,21 +365,21 @@ func (c *chrome) readLoop() {
 				}{}
 				json.Unmarshal([]byte(res.Params.Payload), &payload)
 
-				c.Lock()
+				c.lock.Lock()
 				binding, ok := c.bindings[res.Params.Name]
-				c.Unlock()
+				c.lock.Unlock()
 				if ok {
 					jsString := func(v interface{}) string { b, _ := json.Marshal(v); return string(b) }
-					// go func() {
-					result, error := "", `""`
-					if r, err := binding(payload.Args); err != nil {
-						error = jsString(err.Error())
-					} else if b, err := json.Marshal(r); err != nil {
-						error = jsString(err.Error())
-					} else {
-						result = string(b)
-					}
-					expr := fmt.Sprintf(`
+					go func() {
+						result, error := "", `""`
+						if r, err := binding(payload.Args); err != nil {
+							error = jsString(err.Error())
+						} else if b, err := json.Marshal(r); err != nil {
+							error = jsString(err.Error())
+						} else {
+							result = string(b)
+						}
+						expr := fmt.Sprintf(`
 							if (%[4]s) {
 								window['%[1]s']['errors'].get(%[2]d)(%[4]s);
 							} else {
@@ -387,16 +388,16 @@ func (c *chrome) readLoop() {
 							window['%[1]s']['callbacks'].delete(%[2]d);
 							window['%[1]s']['errors'].delete(%[2]d);
 							`, payload.Name, payload.Seq, result, error)
-					c.send("Runtime.evaluate", h{"expression": expr, "contextId": res.Params.ID})
-					// }()
+						c.send("Runtime.evaluate", h{"expression": expr, "contextId": res.Params.ID})
+					}()
 				}
 				continue
 			}
 
-			c.Lock()
+			c.lock.Lock()
 			resc, ok := c.pending[res.ID]
 			delete(c.pending, res.ID)
-			c.Unlock()
+			c.lock.Unlock()
 
 			if !ok {
 				continue
@@ -435,17 +436,22 @@ func (c *chrome) send(method string, params h) (json.RawMessage, error) {
 		return nil, err
 	}
 	resc := make(chan result)
-	c.Lock()
+	c.lock.Lock()
 	c.pending[int(id)] = resc
-	c.Unlock()
+	c.lock.Unlock()
 
-	if err := c.ws.conn.WriteJSON(h{
+	c.sendLock.Lock()
+	err = c.ws.conn.WriteJSON(h{
 		"id":     int(id),
 		"method": "Target.sendMessageToTarget",
 		"params": h{"message": string(b), "sessionId": c.session},
-	}); err != nil {
+	})
+	c.sendLock.Unlock()
+
+	if err != nil {
 		return nil, err
 	}
+
 	res := <-resc
 	return res.Value, res.Err
 }
@@ -460,12 +466,12 @@ func (c *chrome) eval(expr string) (json.RawMessage, error) {
 }
 
 func (c *chrome) bind(name string, f bindingFunc) error {
-	c.Lock()
+	c.lock.Lock()
 	// check if binding already exists
 	_, exists := c.bindings[name]
 
 	c.bindings[name] = f
-	c.Unlock()
+	c.lock.Unlock()
 
 	if exists {
 		// Just replace callback and return, as the binding was already added to js
