@@ -369,16 +369,16 @@ func (c *chrome) readLoop() {
 				c.Unlock()
 				if ok {
 					jsString := func(v interface{}) string { b, _ := json.Marshal(v); return string(b) }
-					go func() {
-						result, error := "", `""`
-						if r, err := binding(payload.Args); err != nil {
-							error = jsString(err.Error())
-						} else if b, err := json.Marshal(r); err != nil {
-							error = jsString(err.Error())
-						} else {
-							result = string(b)
-						}
-						expr := fmt.Sprintf(`
+					// go func() {
+					result, error := "", `""`
+					if r, err := binding(payload.Args); err != nil {
+						error = jsString(err.Error())
+					} else if b, err := json.Marshal(r); err != nil {
+						error = jsString(err.Error())
+					} else {
+						result = string(b)
+					}
+					expr := fmt.Sprintf(`
 							if (%[4]s) {
 								window['%[1]s']['errors'].get(%[2]d)(%[4]s);
 							} else {
@@ -387,8 +387,8 @@ func (c *chrome) readLoop() {
 							window['%[1]s']['callbacks'].delete(%[2]d);
 							window['%[1]s']['errors'].delete(%[2]d);
 							`, payload.Name, payload.Seq, result, error)
-						c.send("Runtime.evaluate", h{"expression": expr, "contextId": res.Params.ID})
-					}()
+					c.send("Runtime.evaluate", h{"expression": expr, "contextId": res.Params.ID})
+					// }()
 				}
 				continue
 			}
