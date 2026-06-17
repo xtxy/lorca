@@ -2,7 +2,6 @@ package lorca
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 )
 
